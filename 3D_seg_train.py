@@ -8,6 +8,9 @@ import tensorflow as tf
 from unet3plusnew import *
 from process_utils import *
 from volumentations import *
+import random
+from scipy.ndimage import gaussian_filter1d
+from volumentations.core.transforms_interface import ImageOnlyTransform
 
 # Adds patient numbers for MMWHS and HVSMR data
 mmwhs_number = 1 # Change to reflect number of augmented MMWHS datasets
@@ -136,46 +139,49 @@ def focal_tversky_loss(y_true, y_pred,alpha=0.7, beta=0.3, gamma=0.75, smooth=1e
     loss /= tf.cast(num_classes, tf.float32)  # Averaging over all classes
     return loss
 
-# Define surface area loss loss
-def SA_vol_loss(y_true,y_pred):
-
-    loss = 0 
-
-    y_pred = get_one_hot_tf(y_pred,number_of_segmentations)
-    for i in range(number_of_segmentations-1):
-        seg_true = tf.cast(y_true[...,i+1],tf.float32)
-        seg_true = tf.expand_dims(seg_true,-1)
-        RV_MinP_true = -tf.nn.max_pool3d(-seg_true,ksize=1,strides=1,padding='SAME')
-        RV_MinP_MaxP_true = tf.nn.max_pool3d(RV_MinP_true,ksize=3,strides=1,padding='SAME')
-        seg_true_SA = RV_MinP_MaxP_true - RV_MinP_true
-        seg_true_SA_val = tf.reduce_sum(seg_true_SA)
-
-        seg_pred = tf.cast(y_pred[...,i+1],tf.float32)
-        seg_pred = tf.expand_dims(seg_pred,-1)
-        RV_MinP_pred = -tf.nn.max_pool3d(-seg_pred,ksize=1,strides=1,padding='SAME')
-        RV_MinP_MaxP_pred = tf.nn.max_pool3d(RV_MinP_pred,ksize=3,strides=1,padding='SAME')
-        seg_pred_SA = RV_MinP_MaxP_pred - RV_MinP_pred
-        seg_pred_SA_val = tf.reduce_sum(seg_pred_SA)
-
-        loss = loss + tf.square((seg_true_SA_val-seg_pred_SA_val)/2500) * 10e-4
-
-    return loss
-
 
 # Create a single combined loss
 def combined_loss(y_true, y_pred):
-    SA = SA_vol_loss(y_true, y_pred)
     FT = focal_tversky_loss(y_true, y_pred)
-    total_loss = FT +SA
+    total_loss = FT
 
     return total_loss
 
+class GaussianBlur1DTransform(ImageOnlyTransform):
+	def __init__(self, sigma_range=(0.6, 1.4), axis=0,
+				 always_apply=False, p=0.5,
+				 mode='reflect', truncate=3.0):
+		super().__init__(always_apply, p)
+		self.sigma_range = sigma_range
+		self.axis = axis
+		self.mode = mode
+		self.truncate = truncate
+
+	def apply(self, img, **params):
+		sigma = np.random.uniform(*self.sigma_range)
+		# If image is (C, Z, Y, X) blur per channel
+		if img.ndim == 4:
+			out = np.empty_like(img)
+			for c in range(img.shape[0]):
+				out[c] = gaussian_filter1d(img[c], sigma=sigma,
+										   axis=self.axis, mode=self.mode,
+										   truncate=self.truncate)
+			return out
+		# If image is (Z, Y, X)
+		return gaussian_filter1d(img, sigma=sigma,
+								 axis=self.axis, mode=self.mode,
+								 truncate=self.truncate)
+
+	def get_transform_init_args_names(self):
+		return ("sigma_range", "axis", "mode", "truncate")
+	
 # Define rotation and elastic transformation augmentation
 def get_augmentation():
-    return Compose([
-        Rotate((-10, 10), (-10, 10), (-10, 10), p=0.75),
-        ElasticTransform((0, 0.1), interpolation=2, p=0.75)
-    ], p=1.0)
+	return Compose([
+		ElasticTransform((0, 0.1), interpolation=2, p=0.75),
+		GaussianNoise(var_limit=(0, 0.001), p=0.5),
+		GaussianBlur1DTransform(sigma_range=(0.5, 2), axis=0, p=1),
+	], p=1.0)
 aug = get_augmentation()
 
 
@@ -183,7 +189,7 @@ input_shape = [112,256, 128, 1]
 # Instantiate the unet3plus model with the desired parameters
 inputs = tf.keras.Input(shape = input_shape)
 unet3 = unet3plus(inputs,
-                filters=[32,64,128],
+                filters=[32,64,128,256,512],
                 rank = 3,  # dimension
                 out_channels = number_of_segmentations,
                 add_dropout = 0, # 1 or 0 to add dropout

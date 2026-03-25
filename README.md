@@ -1,6 +1,6 @@
 # 3D-Cine
 
-This repository contains code accompanying the *3D Cine* paper by **Mark Wrobel**.
+This repository contains code accompanying the *High Resolution Isotropic ‘Pseudo’ 3D Cine imaging with Automated Segmentation using Concatenated 2D Real-time Imaging and Deep Learning* paper by **Mark Wrobel**.
 
 The pipeline is divided into three main sections:
 
@@ -32,7 +32,7 @@ This will prepare all training data required for model training.
 
 Once the data is pre-processed, train the deep learning models by running the following scripts:
 
-- `3D_debanding_train.py`
+- `3D_contrast_correction_train.py`
 - `3D_respcor_train.py`
 - `3D_E2E_train.py`
 - `3D_seg_train.py`
@@ -43,12 +43,7 @@ Make sure to update the `mmwhs_number` and `hvsmr_number` variables to reflect t
 
 ### 3. Inference and Post-processing
 
-Run `3D_cine_post_processing.ipynb`.
-
-This step can be run independently of the training pipeline.  
-An example healthy volunteer dataset is located in the `raw_data` folder and is processed using trained models located in `models_final/`.
-
-Output 3D Cine data and segmentations are saved as `.npy` arrays in the `processed_data` folder.
+There are two .exe files in the **installer** folder. These install a local app for Windows to run the image correction models or the segmentation model. Both can run on CPU (slow) or DirectML (GPU acceleration) if available. The 3D Cine app expects a .zip file of the real-time concatenated sagittal 2D stack and ouptuts a .zip of the processed DICOM data. The processed .zip can then be dropped straight into the 3D Cine Segmentation app. Note: The segmentation model requires around 16Gb GPU RAM to use DirectML 
 
 ---
 

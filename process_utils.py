@@ -5,6 +5,7 @@ import math
 import tensorflow_addons as tfa
 from skimage.measure import label
 import skimage
+import nibabel as nib
 
 #Fills holes (trabeculations) in 3D mask
 def fill_mask_3d(mask_3d,iter=2):
@@ -60,38 +61,23 @@ def norm(t1):
 	im1 = (im1-np.min(im1)) / np.max(im1)
 	return (im1)
 
-#Function that augments volumes with rotations
-def rotation_augmentation(image,maxrot=np.pi*(5.0/180)):
-    
-    #Random seeds for rotations
-	rg1 = tf.random.Generator.from_seed(1, alg='philox')
-	rg2 = tf.random.Generator.from_seed(2, alg='philox')
-	rg3 = tf.random.Generator.from_seed(3, alg='philox')
+def z_stand(img):
+	mean = np.mean(img)
+	std = np.std(img)
 
-	# Define 3 random angles of rotation
-	rotationangle_1=rg1.normal(shape=(),mean= 0, stddev=maxrot)
-	rotationangle_2=rg2.normal(shape=(),mean= 0, stddev=maxrot)
-	rotationangle_3=rg3.normal(shape=(),mean= 0, stddev=maxrot)
-	
-	#Applies first rotation
-	image=tfa.image.rotate(image, angles=rotationangle_1,interpolation='bilinear',fill_mode='reflect')
-	image = tf.transpose(image,(2,1,0,3))
-
-	#Applies second rotation
-	image=tfa.image.rotate(image, angles=rotationangle_2,interpolation='bilinear',fill_mode='reflect')
-	image = tf.transpose(image,(1,2,0,3))
-	
-	#Applies third rotation
-	image=tfa.image.rotate(image, angles=rotationangle_3,interpolation='bilinear',fill_mode='reflect')
-	image = tf.transpose(image,(1,0,2,3))
-	
-	image = norm(image)
-
-	return image
+	# Apply z-score normalization
+	z_norm_img = (img - mean) / std
+	return z_norm_img
 
 #Function that adds synthetic respiratory deformations to images
-def respiratory_deformations(vol_list):
+def respiratory_deformations(vol_list,xyz, scale = 1):
 	deformed_low_res = []
+ 
+	y_rand = np.random.randint(-5,5)
+	z_rand = np.random.randint(-5,5)
+ 
+	y_max = xyz[1]+y_rand
+	z_max = xyz[2]+z_rand
 
 	for volume in vol_list:
 		def_field = []
@@ -99,45 +85,43 @@ def respiratory_deformations(vol_list):
 		slice_number=0
 
 		breathing_interval = 3*np.random.random() + 3 # 3-6s per breath 
-		magnitude = np.random.random()*1.75 + 0.25 # Magnitude of respiration 
+		magnitude = np.random.random()*1.75 + 0.10 # Magnitude of respiration 
 		phase = np.random.random()
 		heart_beat_interval = 0.6*np.random.random() +  0.6 # 0.6-1.2s per heart beat
 		magnitude_2 = np.random.random()*0.5 + 0.75 #Relative streangth of AP motion to head-foot
 		
 		time = 0
+		breathing_interval_check = breathing_interval
 
 		#Applied to each slice in the volume 
 		while slice_number < np.ma.size(volume, axis = 0):
 			
 			#Small random variations between slices of the same volume
-			variation = np.random.random()/10 +0.95 #Simulates changing breathing magnitude
-			variation_2 = np.random.random()/10 +0.95 #Simulates changing heart rate
-			variation_3 = np.random.random()/10 +0.95 #Simulates changing breathing rate
+			variation = np.random.random()/5 +0.9 #Simulates changing breathing magnitude
+			variation_2 = np.random.random()/5 +0.9 #Simulates changing heart rate
+			variation_3 = np.random.random()/5 +0.9 #Simulates changing breathing rate
 			
 			im = volume[slice_number,:,:,0] # 2D image (slice) to be deformed
 			time += 2  * heart_beat_interval * variation_2 # Time base of respiration
 
 			#Changes breathing parameters after each breathing cycle
-			if time> (breathing_interval*(slice_number+1)):
-
+			if time>= breathing_interval_check:
 				breathing_interval = breathing_interval*variation_3
+				breathing_interval_check= breathing_interval_check+ breathing_interval
 				magnitude = magnitude*variation
 		
 			y,x = im.shape
 			dx = np.zeros((x,y)) # Define Deformation field in x
 			dy = np.zeros((x,y)) # Define Deformation field in y
-
-			x_com, y_com = find_com(im) #slice COM coordinates
    
-			#Calculation of simulated deformations
 			for i in range(x):
-					for j in range(y):
-						if j< 2*y/16 or i>(128-32) or j> 2*y_com:
-							dy[i][j] = 0
-							dx[i][j] = 0
-						else:
-							dy[i][j] = magnitude*(np.sin(2*np.pi*((time/breathing_interval)+phase)))*0.0000001*((i)*(i-96))*((j-2*y/16)*(j-2*y_com))
-							dx[i][j] = -magnitude_2*magnitude*(np.sin(2*np.pi*((time/breathing_interval)+phase)))*0.00000001*((i+80)*(i-96))*((j-2*y/16)*(j-2*y_com))
+				for j in range(y):
+					if j> (2*y_max+10):
+						dy[i][j] = 0
+						dx[i][j] = 0
+					else:
+						dy[i][j] = scale*magnitude*(np.sin(2*np.pi*((time/breathing_interval)+phase)))*0.00000015*((i+30)*(i-96))*((j+10)*(j-2*y_max-10))
+						dx[i][j] = -scale*magnitude_2*magnitude*(np.sin(2*np.pi*((time/breathing_interval)+phase)))*0.000000025*((i+96)*(i-96))*((j+10)*(j-2*y_max-10))
 
 
 			#Processing and appling deformations
@@ -168,7 +152,6 @@ def respiratory_deformations(vol_list):
 		deformed_low_res.append(tf.convert_to_tensor(tf.expand_dims(norm(deformed),axis=-1)))
 	return def_field,deformed_low_res
 
-#Adds contrast differences to data
 def add_bands(vol):
     band_vol = []
     for i in range(28):
@@ -192,84 +175,79 @@ def get_one_hot(targets, num_classes):
     res = np.eye(num_classes)[np.array(targets).reshape(-1)]
     return res.reshape(list(targets.shape)+[num_classes])
 
-#One hot encode tensorflow function
-def get_one_hot_tf(targets, num_classes):
-    # Ensure targets are integers
-    class_indices = tf.argmax(targets, axis=-1)  # Shape: [...], class indices along the last axis
-    
-    # Perform one-hot encoding on the class indices
-    one_hot_encoded = tf.one_hot(class_indices, depth=num_classes)  # Shape: [..., num_classes]
-    
-    return one_hot_encoded
+def lowest_point_along_y(masks_nii_path):
+    """
+    Return (x, y, z) voxel index of the lowest point (max y index) where ANY mask channel is nonzero.
+    Accepts 3D or 4D NIfTI shaped (X, Y, Z[, K]). Raises ValueError if empty.
 
-# Keeps largest component of any mask and adds residual components from other masks if forms 1 structure
-def keep_largest_component_add(masks_array):
-    
-    
-    # Extract the number of channels (i.e., masks)
-    masks_number = masks_array.shape[-1]
- 
-    # Initialize structures
-    out_masks = np.zeros_like(masks_array)  # final output array
-    rest = np.zeros_like(masks_array[..., 0], dtype='float32')  # an empty mask used to accumulate leftover components not in the largest mask for each channel
-    temp_large = []  # to store largest component per mask temporarily
- 
-   # First pass: extract largest component from each channel
-    for i in range(masks_number):
-        mask = masks_array[..., i]
- 
-        if np.sum(mask) == 0: # If mask is empty, skip to next channel
-            print('channel:', i, 'mask is empty')
-            largestCC = np.zeros_like(mask, dtype='float32')
-            temp_large.append(largestCC)
-            continue
- 
-        labels = label(mask) # assigns a unique int label to each connected component in the binary mask
-        # print(f'labels unique in channel {i}:, {np.unique(labels)}')
-        largestCC = labels == np.argmax(np.bincount(labels.flat, weights=mask.flat)) * 1 # First, counts weighted pixels per component, the finds the label with most non-zero (weighted) pixels, then returns a binary mask where only the largest component is true
-        # print('labels after bincount and argmax is bool arr of shape:', (labels == np.argmax(np.bincount(labels.flat, weights=mask.flat)) * 1).shape, 'and sum:', np.sum(labels == np.argmax(np.bincount(labels.flat, weights=mask.flat)) * 1))
-        largestCC = largestCC.astype('float32')
-        # print('channel:', i, 'largestCC:', np.sum(largestCC), 'rest initial:', np.sum(rest), 'mask:', np.sum(mask))
-        rest += mask - largestCC # add everything NOT in the largest component to the rest mask (i.e. islands not connected to the largest component).
-        # print('channel:', i, 'largestCC:', np.sum(largestCC), 'rest added mask - largestCC:', np.sum(rest))
-        temp_large.append(largestCC) # store the largest component of this mask for next step
- 
-    # Second pass: refine each mask by considering potential small components touching other structures
-    for i in range(masks_number):
-        if i == 0:
-            out_masks[..., i] = temp_large[i].astype('int') # don't add connected components to background, just keep original mask
-            continue
-        if np.sum(temp_large[i]) == 0: # If mask is empty, skip to next channel
-            print('channel:', i, 'temp_large is empty so not adding connected components')
-            out_masks[..., i] = temp_large[i].astype('int') # don't add connected components if original channel was empty, just keep original empty mask
-            continue
-        combined = temp_large[i] + rest # combines current largest component with rest of the leftover pieces
-        # print('\nchannel:', i, 'temp_large:', temp_large[i].sum(), 'rest:', np.sum(rest), 'combined:', np.sum(combined))
-        labels = label(combined) # again applies label to find all new connected regions
-        refined_largestCC = labels == np.argmax(np.bincount(labels.flat, weights=combined.flat)) # again, finds the largest connected region in this combined mask
-        # print('channel:', i, 'refined_largestCC:', np.sum(refined_largestCC), 'rest:', np.sum(rest), 'temp large:', np.sum(temp_large[i]))
-        refined_largestCC = refined_largestCC.astype('float32')
-        rest = rest - refined_largestCC + temp_large[i]  # subtracting the new largest region removes components added to main mask from rest. Re-adding the original largest component avoids -1s in the binary mask.
-        # print('channel:', i, 'refined_largestCC:', np.sum(refined_largestCC), 'rest updated:', np.sum(rest))
-        out_masks[..., i] = refined_largestCC #  save the new largest component to the output list
- 
-    # Final pass: remove any remaining islands in the rest mask by adding to background
-    out_masks[..., 0] = out_masks[..., 0] + rest # add the rest mask to the background mask
- 
-    # Add check that the sum of binary masks is same in input as output (i.e. each voxel belongs to only one class)
-    assert masks_array.sum() == out_masks.sum(),  f"input masks sum {masks_array.sum()} should equal postprocessed masks sum {out_masks.sum()}"
- 
-    # output the cleaned list of masks
-    return out_masks
+    Parameters
+    ----------
+    masks_nii_path : str
+        Path to the masks .nii.gz file.
 
-#Applies CLAHE
-def apply_clahe(img):
-   
-    img = (img - np.min(img))
-    img = img/np.max(img)
-    img = skimage.exposure.equalize_adapthist(img)
-    img = (img - np.min(img))
-    img = img/np.max(img)
-    
-    return(img)
+    Returns
+    -------
+    (int, int, int)
+        (x, y, z) voxel indices in array space.
+    """
+    nii = nib.load(masks_nii_path)
+    data = np.asanyarray(nii.dataobj)
+    data = data[...,:4]
 
+    # Union across channels if 4D; otherwise treat as 3D
+    if data.ndim == 4:
+        union = np.any(data != 0, axis=3)
+    elif data.ndim == 3:
+        union = (data != 0)
+    else:
+        raise ValueError(f"Expected 3D or 4D NIfTI, got shape {data.shape}")
+
+    xs, ys, zs = np.where(union)
+    if xs.size == 0:
+        raise ValueError("Masks are empty (no nonzero voxels).")
+
+    y_max = ys.max()
+    pick = (ys == y_max)
+
+    # Among voxels at max y, choose the one with largest z, then largest x
+    xs_y = xs[pick]
+    zs_y = zs[pick]
+    order = np.lexsort((xs_y, zs_y))  # primary: z, secondary: x (ascending)
+    i = order[-1]
+
+    return int(xs_y[i]), int(y_max), int(zs_y[i])
+
+def crop_with_padding(data, center, crop_shape):
+    """
+    Crops 3D or 4D data [X, Y, Z, (C)] around center with shape crop_shape, pads as needed.
+    """
+    data_shape = data.shape[:3]
+    slices = []
+    pads = []
+
+    for i in range(3):
+        half = crop_shape[i] // 2
+
+        start = center[i] - half
+        end = center[i] + crop_shape[i] - half
+
+        pad_before = max(0, -start)
+        pad_after = max(0, end - data_shape[i])
+
+        real_start = max(0, start)
+        real_end = min(end, data_shape[i])
+
+        slices.append(slice(real_start, real_end))
+        pads.append((pad_before, pad_after))
+
+    # Crop
+    if data.ndim == 4:
+        cropped = data[slices[0], slices[1], slices[2], :]
+        pads.append((0, 0))  # No padding for channel dimension
+    else:
+        cropped = data[slices[0], slices[1], slices[2]]
+
+    # Pad as needed
+    cropped_padded = np.pad(cropped, pads, mode='constant')
+
+    return cropped_padded
